@@ -2,6 +2,7 @@ import pandas as pd
 from prophet import Prophet
 import os
 import numpy as np
+from sklearn.linear_model import LinearRegression
 
 def load_data():
     file_path = os.path.join(os.path.dirname(__file__), "..", "dataset", "clothing_sales.csv")
@@ -27,24 +28,31 @@ def forecast_prophet(df, sku, target="revenue", days=30):
     return forecast.to_dict("records")
 
 
-def forecast_custom(df, sku, target="revenue", days=30, window=7):
-    """Simple Moving Average Forecast"""
+def forecast_custom(df, sku, target="revenue", days=30, window=30):
     df_sku = df[df["sku"] == sku].sort_values("order_date")
     if df_sku.shape[0] < window:
         return {"error": f"Not enough data for this SKU (need at least {window} points)."}
 
-    # Compute rolling mean of last window
-    last_value = df_sku[target].rolling(window=window).mean().iloc[-1]
+    # Select last `window` points
+    y = df_sku[target].tail(window).values
+    X = np.arange(len(y)).reshape(-1, 1)
+
+    # Fit simple linear regression
+    model = LinearRegression()
+    model.fit(X, y)
+
+    # Forecast future days
+    future_X = np.arange(len(y), len(y) + days).reshape(-1, 1)
+    y_pred = model.predict(future_X)
 
     future_dates = pd.date_range(start=df_sku["order_date"].max() + pd.Timedelta(days=1), periods=days)
     forecast = pd.DataFrame({
         "ds": future_dates,
-        "yhat": [last_value] * days,
-        "yhat_lower": [last_value * 0.9] * days,
-        "yhat_upper": [last_value * 1.1] * days,
+        "yhat": y_pred,
+        "yhat_lower": y_pred * 0.9,
+        "yhat_upper": y_pred * 1.1
     })
     return forecast.to_dict("records")
-
 
 def forecast_sku(df, sku, target="revenue", days=30):
     prophet_result = forecast_prophet(df, sku, target, days)
