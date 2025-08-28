@@ -1,6 +1,8 @@
 fastapi
+scikit-learn
 uvicorn
 pandas
 prophet
 python-multipart
-scikit-learn
+
+
