@@ -28,7 +28,7 @@ def forecast_prophet(df, sku, target="revenue", days=30):
     return forecast.to_dict("records")
 
 
-def forecast_custom(df, sku, target="revenue", days=30, window=30):
+def forecast_linear_regression(df, sku, target="revenue", days=30, window=30):
     df_sku = df[df["sku"] == sku].sort_values("order_date")
     if df_sku.shape[0] < window:
         return {"error": f"Not enough data for this SKU (need at least {window} points)."}
@@ -54,6 +54,26 @@ def forecast_custom(df, sku, target="revenue", days=30, window=30):
     })
     return forecast.to_dict("records")
 
+def holt_winters_forecast(df, periods=30, seasonal_periods=7):
+    df = df.set_index("ds")
+    
+    model = ExponentialSmoothing(
+        df["y"],
+        trend="add", 
+        seasonal="add", 
+        seasonal_periods=seasonal_periods
+    )
+    fit = model.fit()
+    
+    forecast = fit.forecast(periods)
+    
+    result = pd.DataFrame({
+        "ds": pd.date_range(df.index[-1] + pd.Timedelta(days=1), periods=periods, freq="D"),
+        "yhat": forecast.values
+    })
+    return result
+
+
 def forecast_sku(df, sku, target="revenue", days=30):
     prophet_result = forecast_prophet(df, sku, target, days)
     custom_result = forecast_custom(df, sku, target, days)
@@ -62,3 +82,4 @@ def forecast_sku(df, sku, target="revenue", days=30):
         "prophet": prophet_result,
         "custom": custom_result
     }
+
