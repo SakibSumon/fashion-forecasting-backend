@@ -4,6 +4,8 @@ import os
 import numpy as np
 from sklearn.linear_model import LinearRegression
 
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+
 def load_data():
     file_path = os.path.join(os.path.dirname(__file__), "..", "dataset", "clothing_sales.csv")
     df = pd.read_csv(file_path, parse_dates=["order_date"])
@@ -82,4 +84,5 @@ def forecast_sku(df, sku, target="revenue", days=30):
         "prophet": prophet_result,
         "custom": custom_result
     }
+
 
