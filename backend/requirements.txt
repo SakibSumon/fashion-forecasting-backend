@@ -4,3 +4,5 @@ pandas
 prophet
 python-multipart
 scikit-learn
+statsmodels
+
