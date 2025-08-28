@@ -56,30 +56,38 @@ def forecast_custom(df, sku, target="revenue", days=30, window=30):
     })
     return forecast.to_dict("records")
 
-def holt_winters_forecast(df, periods=30, seasonal_periods=7):
-    df = df.set_index("ds")
-    
+def holt_winters_forecast(df, sku, target="revenue", periods=30, seasonal_periods=7):
+    df_sku = df[df["sku"] == sku].rename(columns={"order_date": "ds", target: "y"})
+    df_sku = df_sku.sort_values("ds")
+
+    if df_sku.shape[0] < seasonal_periods * 2:  # need enough data
+        return {"error": f"Not enough data for Holt-Winters (need at least {seasonal_periods*2} points)."}
+
+    df_sku = df_sku.set_index("ds")
+
     model = ExponentialSmoothing(
-        df["y"],
+        df_sku["y"],
         trend="add", 
         seasonal="add", 
         seasonal_periods=seasonal_periods
     )
     fit = model.fit()
-    
+
     forecast = fit.forecast(periods)
-    
+
     result = pd.DataFrame({
-        "ds": pd.date_range(df.index[-1] + pd.Timedelta(days=1), periods=periods, freq="D"),
-        "yhat": forecast.values
+        "ds": pd.date_range(df_sku.index[-1] + pd.Timedelta(days=1), periods=periods, freq="D"),
+        "yhat": forecast.values,
+        "yhat_lower": forecast.values * 0.9,
+        "yhat_upper": forecast.values * 1.1
     })
-    return result
+    return result.to_dict("records")
 
 
 def forecast_sku(df, sku, target="revenue", days=30):
     prophet_result = forecast_prophet(df, sku, target, days)
     custom_result = forecast_custom(df, sku, target, days)
-    hw_result = holt_winters_forecast(df, days)
+    hw_result = holt_winters_forecast(df, sku, target, days)
 
     return {
         "prophet": prophet_result,
