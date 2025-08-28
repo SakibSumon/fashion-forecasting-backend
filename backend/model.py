@@ -79,11 +79,14 @@ def holt_winters_forecast(df, periods=30, seasonal_periods=7):
 def forecast_sku(df, sku, target="revenue", days=30):
     prophet_result = forecast_prophet(df, sku, target, days)
     custom_result = forecast_custom(df, sku, target, days)
+    hw_result = holt_winters_forecast(df, days)
 
     return {
         "prophet": prophet_result,
-        "custom": custom_result
+        "custom": custom_result,
+        "holt_winters": hw_result
     }
+
 
 
 
