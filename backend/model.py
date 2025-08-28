@@ -30,7 +30,7 @@ def forecast_prophet(df, sku, target="revenue", days=30):
     return forecast.to_dict("records")
 
 
-def forecast_linear_regression(df, sku, target="revenue", days=30, window=30):
+def forecast_custom(df, sku, target="revenue", days=30, window=30):
     df_sku = df[df["sku"] == sku].sort_values("order_date")
     if df_sku.shape[0] < window:
         return {"error": f"Not enough data for this SKU (need at least {window} points)."}
@@ -84,5 +84,6 @@ def forecast_sku(df, sku, target="revenue", days=30):
         "prophet": prophet_result,
         "custom": custom_result
     }
+
 
 
