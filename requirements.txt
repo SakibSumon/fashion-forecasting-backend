@@ -3,3 +3,4 @@ uvicorn
 pandas
 prophet
 python-multipart
+scikit-learn
