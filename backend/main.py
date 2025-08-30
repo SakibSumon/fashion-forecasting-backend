@@ -1,7 +1,7 @@
 # backend/main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from model import load_data, forecast_sku
+from model import load_data, forecast_sku, evaluate_models
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"])
@@ -18,3 +18,10 @@ def forecast(sku: str, target: str = "revenue", days: int = 30):
     
     return forecast_sku(data, sku, target, days)
 
+@app.get("/evaluate/{sku}")
+def evaluate_model(sku: str, target: str = "revenue", test_size: int = 30):
+    valid_targets = ["revenue", "quantity"]
+    if target not in valid_targets:
+        return {"error": f"Invalid target. Must be one of: {valid_targets}"}
+    
+    return evaluate_models(data, sku, target, test_size)

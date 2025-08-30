@@ -3,6 +3,8 @@ from prophet import Prophet
 import os
 import numpy as np
 from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+import math
 
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
@@ -83,6 +85,56 @@ def holt_winters_forecast(df, sku, target="revenue", periods=30, seasonal_period
     })
     return result.to_dict("records")
 
+
+def evaluate_models(df, sku, target="revenue", test_size=30):
+    df_sku = df[df["sku"] == sku].sort_values("order_date")
+    if df_sku.shape[0] < test_size + 30:
+        return {"error": f"Not enough data for evaluation (need at least {test_size + 30} points)."}
+    
+    # Split data into train and test
+    train = df_sku.iloc[:-test_size]
+    test = df_sku.iloc[-test_size:]
+    
+    results = {}
+    
+    # Evaluate Prophet
+    try:
+        prophet_forecast = forecast_prophet(train, sku, target, test_size)
+        if "error" not in prophet_forecast:
+            actuals = test[target].values
+            predicted = [f["yhat"] for f in prophet_forecast]
+            results["prophet"] = calculate_metrics(actuals, predicted)
+    except:
+        results["prophet"] = {"error": "Evaluation failed"}
+    
+    # Evaluate Custom model
+    try:
+        custom_forecast = forecast_custom(train, sku, target, test_size)
+        if "error" not in custom_forecast:
+            actuals = test[target].values
+            predicted = [f["yhat"] for f in custom_forecast]
+            results["custom"] = calculate_metrics(actuals, predicted)
+    except:
+        results["custom"] = {"error": "Evaluation failed"}
+    
+    # Evaluate Holt-Winters
+    try:
+        hw_forecast = holt_winters_forecast(train, sku, target, test_size)
+        if "error" not in hw_forecast:
+            actuals = test[target].values
+            predicted = [f["yhat"] for f in hw_forecast]
+            results["holt_winters"] = calculate_metrics(actuals, predicted)
+    except:
+        results["holt_winters"] = {"error": "Evaluation failed"}
+    
+    return results
+
+def calculate_metrics(actual, predicted):
+    return {
+        "mae": mean_absolute_error(actual, predicted),
+        "rmse": math.sqrt(mean_squared_error(actual, predicted)),
+        "mape": np.mean(np.abs((actual - predicted) / actual)) * 100
+    }
 
 def forecast_sku(df, sku, target="revenue", days=30):
     prophet_result = forecast_prophet(df, sku, target, days)
