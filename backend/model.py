@@ -92,34 +92,30 @@ def forecast_arima(df, sku, target="revenue", days=30):
     df_sku = df[df["sku"] == sku].sort_values("order_date")
     if df_sku.shape[0] < 30:
         return {"error": f"Not enough data for ARIMA (need at least 30 points)."}
-    
-    # Prepare the time series data
+
     y = df_sku.set_index("order_date")[target]
-    
+
     try:
-        # Fit ARIMA model - using auto-selection for p,d,q parameters
-        # For seasonal data, we might use seasonal ARIMA, but let's start with standard ARIMA
-        model = ARIMA(y, order=(1, 1, 1))  # Basic parameters
+        # Fit ARIMA model
+        model = ARIMA(y, order=(1, 1, 1))
         model_fit = model.fit()
-        
-        # Generate forecast
-        forecast = model_fit.forecast(steps=days)
-        
-        # Create confidence intervals (assuming 10% variability)
-        lower_bounds = forecast * 0.9
-        upper_bounds = forecast * 1.1
-        
-        # Prepare results
+
+        # Use get_forecast to obtain predictions + confidence intervals
+        forecast_obj = model_fit.get_forecast(steps=days)
+        forecast = forecast_obj.predicted_mean
+        conf_int = forecast_obj.conf_int(alpha=0.05)  # 95% confidence interval
+
         future_dates = pd.date_range(start=y.index[-1] + pd.Timedelta(days=1), periods=days)
+
         result = []
         for i in range(days):
             result.append({
                 "ds": future_dates[i],
-                "yhat": forecast[i],
-                "yhat_lower": lower_bounds[i],
-                "yhat_upper": upper_bounds[i]
+                "yhat": forecast.iloc[i],
+                "yhat_lower": conf_int.iloc[i, 0],
+                "yhat_upper": conf_int.iloc[i, 1]
             })
-        
+
         return result
     except Exception as e:
         return {"error": f"ARIMA model failed: {str(e)}"}
