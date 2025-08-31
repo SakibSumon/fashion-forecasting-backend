@@ -9,7 +9,7 @@ import math
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
 def load_data():
-    file_path = os.path.join(os.path.dirname(__file__), "..", "dataset", "clothing_sales.csv")
+    file_path = os.path.join(os.path.dirname(__file__), "..", "dataset", "fashion_sales_dataset.csv")
     df = pd.read_csv(file_path, parse_dates=["order_date"])
     df = df.groupby(["order_date", "sku"]).agg({
         "revenue": "sum",
