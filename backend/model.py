@@ -8,6 +8,7 @@ import math
 from statsmodels.tsa.arima.model import ARIMA
 import warnings
 warnings.filterwarnings('ignore')  
+from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
@@ -120,6 +121,41 @@ def forecast_arima(df, sku, target="revenue", days=30):
     except Exception as e:
         return {"error": f"ARIMA model failed: {str(e)}"}
 
+def forecast_sarima(df, sku, target="revenue", days=30, seasonal_periods=7):
+    df_sku = df[df["sku"] == sku].sort_values("order_date")
+    if df_sku.shape[0] < 2 * seasonal_periods:
+        return {"error": f"Not enough data for SARIMA (need at least {2*seasonal_periods} points)."}
+
+    y = df_sku.set_index("order_date")[target]
+
+    try:
+        model = SARIMAX(
+            y,
+            order=(1, 1, 1),                 # ARIMA part
+            seasonal_order=(1, 1, 1, seasonal_periods),  # seasonal part
+            enforce_stationarity=False,
+            enforce_invertibility=False
+        )
+        model_fit = model.fit(disp=False)
+
+        forecast_obj = model_fit.get_forecast(steps=days)
+        forecast = forecast_obj.predicted_mean
+        conf_int = forecast_obj.conf_int(alpha=0.05)
+
+        future_dates = pd.date_range(start=y.index[-1] + pd.Timedelta(days=1), periods=days)
+
+        result = []
+        for i in range(days):
+            result.append({
+                "ds": future_dates[i],
+                "yhat": forecast.iloc[i],
+                "yhat_lower": conf_int.iloc[i, 0],
+                "yhat_upper": conf_int.iloc[i, 1]
+            })
+
+        return result
+    except Exception as e:
+        return {"error": f"SARIMA model failed: {str(e)}"}
 
 def evaluate_models(df, sku, target="revenue", test_size=30):
     df_sku = df[df["sku"] == sku].sort_values("order_date")
@@ -171,8 +207,22 @@ def evaluate_models(df, sku, target="revenue", test_size=30):
             results["arima"] = calculate_metrics(actuals, predicted)
     except:
         results["arima"] = {"error": "Evaluation failed"}
+
+
+     # SARIMA
+    try:
+        sarima_forecast = forecast_sarima(train, sku, target, test_size)
+        if "error" not in sarima_forecast:
+            actuals = test[target].values
+            predicted = [f["yhat"] for f in sarima_forecast]
+            results["sarima"] = calculate_metrics(actuals, predicted)
+    except:
+        results["sarima"] = {"error": "Evaluation failed"}
     
     return results
+
+   
+
 
 def calculate_metrics(actual, predicted):
     return {
@@ -186,12 +236,14 @@ def forecast_sku(df, sku, target="revenue", days=30):
     custom_result = forecast_custom(df, sku, target, days)
     hw_result = holt_winters_forecast(df, sku, target, days)
     arima_result = forecast_arima(df, sku, target, days)
+    sarima_result = forecast_sarima(df, sku, target, days)
 
     return {
         "prophet": prophet_result,
         "custom": custom_result,
         "holt_winters": hw_result,
-        "arima": arima_result
+        "arima": arima_result,
+        "sarima": sarima_result
     }
 
 
