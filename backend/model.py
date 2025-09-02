@@ -1,7 +1,5 @@
 import pandas as pd
 from prophet import Prophet
-from prophet.diagnostics import cross_validation, performance_metrics
-import itertools
 import os
 import numpy as np
 from sklearn.linear_model import LinearRegression
@@ -13,8 +11,6 @@ warnings.filterwarnings('ignore')
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.stattools import adfuller
-from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
-import matplotlib.pyplot as plt
 
 def load_data():
     file_path = os.path.join(os.path.dirname(__file__), "..", "dataset", "fashion_sales_dataset.csv")
@@ -25,49 +21,27 @@ def load_data():
     }).reset_index()
     return df
 
-def tune_prophet_hyperparameters(df_sku, horizon=30, initial='180 days', period='30 days'):
-    """Tune Prophet hyperparameters using grid search"""
-    param_grid = {
-        'changepoint_prior_scale': [0.001, 0.01, 0.1, 0.5],
-        'seasonality_prior_scale': [0.01, 0.1, 1.0, 10.0],
-        'seasonality_mode': ['additive', 'multiplicative']
-    }
+def fast_prophet_hyperparameters(df_sku):
+    """Fast Prophet parameter tuning with sensible defaults"""
+    # Quick heuristic-based tuning instead of grid search
+    volatility = df_sku['y'].pct_change().std()
     
-    all_params = [dict(zip(param_grid.keys(), v)) for v in itertools.product(*param_grid.values())]
-    mapes = []
-    
-    # Use historical data for parameter tuning
-    cutoff_date = df_sku['ds'].max() - pd.Timedelta(days=horizon)
-    train_df = df_sku[df_sku['ds'] <= cutoff_date]
-    
-    if len(train_df) < 60:  # Need sufficient data for tuning
-        return {'changepoint_prior_scale': 0.05, 'seasonality_prior_scale': 10.0, 'seasonality_mode': 'additive'}
-    
-    for params in all_params:
-        try:
-            m = Prophet(**params)
-            m.fit(train_df)
-            
-            # Cross-validation
-            df_cv = cross_validation(m, initial=initial, period=period, horizon=f'{horizon} days')
-            df_p = performance_metrics(df_cv)
-            mapes.append(df_p['mape'].values[0])
-        except:
-            mapes.append(float('inf'))
-    
-    # Return best parameters
-    best_params = all_params[np.argmin(mapes)]
-    return best_params
+    if volatility > 0.3:  # High volatility
+        return {'changepoint_prior_scale': 0.1, 'seasonality_prior_scale': 10.0}
+    elif volatility > 0.1:  # Medium volatility
+        return {'changepoint_prior_scale': 0.05, 'seasonality_prior_scale': 1.0}
+    else:  # Low volatility
+        return {'changepoint_prior_scale': 0.01, 'seasonality_prior_scale': 0.1}
 
 def forecast_prophet(df, sku, target="revenue", days=30):
     df_sku = df[df["sku"] == sku].rename(columns={"order_date": "ds", target: "y"})
     if df_sku.shape[0] < 10:
         return {"error": "Not enough data for this SKU."}
 
-    # Tune hyperparameters
-    best_params = tune_prophet_hyperparameters(df_sku, horizon=min(30, days))
+    # Fast parameter tuning
+    best_params = fast_prophet_hyperparameters(df_sku)
     
-    model = Prophet(**best_params)
+    model = Prophet(**best_params, yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
     model.fit(df_sku)
 
     future = model.make_future_dataframe(periods=days)
@@ -76,45 +50,15 @@ def forecast_prophet(df, sku, target="revenue", days=30):
     return forecast.to_dict("records")
 
 def forecast_custom(df, sku, target="revenue", days=30):
-    """Enhanced custom model with automatic window size selection"""
+    """Fast custom model with fixed window"""
     df_sku = df[df["sku"] == sku].sort_values("order_date")
     
-    # Find optimal window size using recent data for validation
-    if df_sku.shape[0] >= 60:
-        # Use last 30 days for validation to find best window size
-        val_size = 30
-        train_val = df_sku.iloc[:-val_size]
-        val_data = df_sku.iloc[-val_size:]
-        
-        best_window = 30  # default
-        best_mae = float('inf')
-        
-        for window in [15, 30, 60, 90]:
-            if len(train_val) >= window + val_size:
-                # Train on the last 'window' points before validation period
-                train_window = train_val.tail(window)
-                y = train_window[target].values
-                X = np.arange(len(y)).reshape(-1, 1)
-                
-                model = LinearRegression()
-                model.fit(X, y)
-                
-                # Predict validation period
-                val_X = np.arange(len(y), len(y) + val_size).reshape(-1, 1)
-                val_pred = model.predict(val_X)
-                
-                mae = mean_absolute_error(val_data[target].values, val_pred)
-                if mae < best_mae:
-                    best_mae = mae
-                    best_window = window
-    else:
-        best_window = min(30, len(df_sku) - days) if len(df_sku) > days else len(df_sku) // 2
-    
-    if df_sku.shape[0] < best_window:
-        return {"error": f"Not enough data for this SKU (need at least {best_window} points)."}
+    # Use fixed window size for speed
+    window = min(30, len(df_sku) - 1)
+    if df_sku.shape[0] < window:
+        return {"error": f"Not enough data for this SKU (need at least {window} points)."}
 
-    # Use optimal window for final forecast
-    y = df_sku[target].tail(best_window).values
+    y = df_sku[target].tail(window).values
     X = np.arange(len(y)).reshape(-1, 1)
 
     model = LinearRegression()
@@ -132,35 +76,18 @@ def forecast_custom(df, sku, target="revenue", days=30):
     })
     return forecast.to_dict("records")
 
-def tune_holt_winters_parameters(df_sku, target="y", seasonal_periods=7):
-    """Find best Holt-Winters parameters"""
-    y = df_sku.set_index("ds")[target]
+def fast_holt_winters_parameters(df_sku):
+    """Fast Holt-Winters parameter selection"""
+    y = df_sku.set_index("ds")["y"]
     
-    best_score = float('inf')
-    best_params = {}
+    # Simple heuristic: if data shows clear seasonality, use multiplicative
+    # Otherwise use additive
+    if len(y) > 14:  # Need enough data to check seasonality
+        seasonal_strength = (y[-14:].std() / y.std()) if y.std() > 0 else 0
+        if seasonal_strength > 1.2:
+            return {'trend': 'add', 'seasonal': 'mul'}
     
-    # Test different combinations
-    for trend in ['add', 'mul', None]:
-        for seasonal in ['add', 'mul', None]:
-            if seasonal and len(y) < seasonal_periods * 2:
-                continue
-                
-            try:
-                model = ExponentialSmoothing(
-                    y,
-                    trend=trend,
-                    seasonal=seasonal,
-                    seasonal_periods=seasonal_periods if seasonal else None
-                )
-                fit = model.fit()
-                # Use AIC as selection criterion
-                if fit.aic < best_score:
-                    best_score = fit.aic
-                    best_params = {'trend': trend, 'seasonal': seasonal}
-            except:
-                continue
-    
-    return best_params if best_params else {'trend': 'add', 'seasonal': 'add'}
+    return {'trend': 'add', 'seasonal': 'add'}
 
 def holt_winters_forecast(df, sku, target="revenue", periods=30, seasonal_periods=7):
     df_sku = df[df["sku"] == sku].rename(columns={"order_date": "ds", target: "y"})
@@ -169,17 +96,17 @@ def holt_winters_forecast(df, sku, target="revenue", periods=30, seasonal_period
     if df_sku.shape[0] < seasonal_periods * 2:
         return {"error": f"Not enough data for Holt-Winters (need at least {seasonal_periods*2} points)."}
 
-    # Tune parameters
-    best_params = tune_holt_winters_parameters(df_sku, seasonal_periods=seasonal_periods)
+    # Fast parameter selection
+    best_params = fast_holt_winters_parameters(df_sku)
     
     df_sku = df_sku.set_index("ds")
     model = ExponentialSmoothing(
         df_sku["y"],
         trend=best_params['trend'],
         seasonal=best_params['seasonal'],
-        seasonal_periods=seasonal_periods if best_params['seasonal'] else None
+        seasonal_periods=seasonal_periods
     )
-    fit = model.fit()
+    fit = model.fit(optimized=True)  # Use optimized fitting
 
     forecast = fit.forecast(periods)
 
@@ -191,39 +118,23 @@ def holt_winters_forecast(df, sku, target="revenue", periods=30, seasonal_period
     })
     return result.to_dict("records")
 
-def find_best_arima_params(y, max_p=3, max_d=2, max_q=3):
-    """Find best ARIMA parameters using grid search with BIC"""
-    best_bic = float('inf')
-    best_order = (1, 1, 1)  # default
+def fast_arima_params(y):
+    """Fast ARIMA parameter selection using simple rules"""
+    # Check stationarity
+    try:
+        adf_result = adfuller(y)
+        is_stationary = adf_result[1] <= 0.05
+    except:
+        is_stationary = False
     
-    # Test for stationarity to determine d
-    result = adfuller(y)
-    if result[1] > 0.05:
-        d_range = [1, 2]  # needs differencing
+    # Simple rules-based parameter selection
+    if is_stationary:
+        return (1, 0, 1)  # Stationary data
     else:
-        d_range = [0, 1]
-    
-    for p in range(max_p + 1):
-        for d in d_range:
-            for q in range(max_q + 1):
-                if p == 0 and q == 0:
-                    continue  # Skip invalid orders
-                
-                try:
-                    model = ARIMA(y, order=(p, d, q))
-                    model_fit = model.fit()
-                    bic = model_fit.bic
-                    
-                    if bic < best_bic:
-                        best_bic = bic
-                        best_order = (p, d, q)
-                except:
-                    continue
-    
-    return best_order
+        return (1, 1, 1)  # Non-stationary data
 
 def forecast_arima(df, sku, target="revenue", days=30):
-    """ARIMA with automatic parameter selection"""
+    """Fast ARIMA with simple parameter selection"""
     df_sku = df[df["sku"] == sku].sort_values("order_date")
     if df_sku.shape[0] < 30:
         return {"error": f"Not enough data for ARIMA (need at least 30 points)."}
@@ -231,14 +142,12 @@ def forecast_arima(df, sku, target="revenue", days=30):
     y = df_sku.set_index("order_date")[target]
 
     try:
-        # Find optimal parameters
-        best_order = find_best_arima_params(y)
+        # Fast parameter selection
+        best_order = fast_arima_params(y)
         
-        # Fit ARIMA model with best parameters
         model = ARIMA(y, order=best_order)
         model_fit = model.fit()
 
-        # Use get_forecast to obtain predictions + confidence intervals
         forecast_obj = model_fit.get_forecast(steps=days)
         forecast = forecast_obj.predicted_mean
         conf_int = forecast_obj.conf_int(alpha=0.05)
@@ -258,44 +167,8 @@ def forecast_arima(df, sku, target="revenue", days=30):
     except Exception as e:
         return {"error": f"ARIMA model failed: {str(e)}"}
 
-def find_best_sarima_params(y, seasonal_periods=7, max_p=2, max_d=1, max_q=2, max_P=1, max_D=1, max_Q=1):
-    """Find best SARIMA parameters using grid search with BIC"""
-    best_bic = float('inf')
-    best_order = (1, 1, 1)
-    best_seasonal_order = (1, 1, 1, seasonal_periods)
-    
-    # Limited grid search for performance
-    for p in [0, 1, 2]:
-        for d in [0, 1]:
-            for q in [0, 1, 2]:
-                for P in [0, 1]:
-                    for D in [0, 1]:
-                        for Q in [0, 1]:
-                            if p == 0 and q == 0 and P == 0 and Q == 0:
-                                continue
-                            
-                            try:
-                                model = SARIMAX(
-                                    y,
-                                    order=(p, d, q),
-                                    seasonal_order=(P, D, Q, seasonal_periods),
-                                    enforce_stationarity=False,
-                                    enforce_invertibility=False
-                                )
-                                model_fit = model.fit(disp=False)
-                                bic = model_fit.bic
-                                
-                                if bic < best_bic:
-                                    best_bic = bic
-                                    best_order = (p, d, q)
-                                    best_seasonal_order = (P, D, Q, seasonal_periods)
-                            except:
-                                continue
-    
-    return best_order, best_seasonal_order
-
 def forecast_sarima(df, sku, target="revenue", days=30, seasonal_periods=7):
-    """SARIMA with automatic parameter selection"""
+    """Fast SARIMA with fixed parameters"""
     df_sku = df[df["sku"] == sku].sort_values("order_date")
     if df_sku.shape[0] < 2 * seasonal_periods:
         return {"error": f"Not enough data for SARIMA (need at least {2*seasonal_periods} points)."}
@@ -303,13 +176,11 @@ def forecast_sarima(df, sku, target="revenue", days=30, seasonal_periods=7):
     y = df_sku.set_index("order_date")[target]
 
     try:
-        # Find optimal parameters
-        best_order, best_seasonal_order = find_best_sarima_params(y, seasonal_periods)
-        
+        # Use fixed parameters for speed - (1,1,1) x (1,1,1,7) works well for many cases
         model = SARIMAX(
             y,
-            order=best_order,
-            seasonal_order=best_seasonal_order,
+            order=(1, 1, 1),
+            seasonal_order=(1, 1, 1, seasonal_periods),
             enforce_stationarity=False,
             enforce_invertibility=False
         )
@@ -334,81 +205,53 @@ def forecast_sarima(df, sku, target="revenue", days=30, seasonal_periods=7):
     except Exception as e:
         return {"error": f"SARIMA model failed: {str(e)}"}
 
-def evaluate_models(df, sku, target="revenue", test_size=30):
+def evaluate_models_fast(df, sku, target="revenue", test_size=30):
+    """Fast evaluation with limited model testing"""
     df_sku = df[df["sku"] == sku].sort_values("order_date")
     if df_sku.shape[0] < test_size + 30:
         return {"error": f"Not enough data for evaluation (need at least {test_size + 30} points)."}
     
-    # Split data into train and test
     train = df_sku.iloc[:-test_size]
     test = df_sku.iloc[-test_size:]
     
     results = {}
     
-    # Evaluate Prophet
-    try:
-        prophet_forecast = forecast_prophet(train, sku, target, test_size)
-        if "error" not in prophet_forecast:
-            actuals = test[target].values
-            predicted = [f["yhat"] for f in prophet_forecast]
-            results["prophet"] = calculate_metrics(actuals, predicted)
-        else:
-            results["prophet"] = {"error": prophet_forecast["error"]}
-    except Exception as e:
-        results["prophet"] = {"error": f"Evaluation failed: {str(e)}"}
+    # Only evaluate 2-3 fastest models for speed
+    models_to_test = ['prophet', 'custom', 'holt_winters']
     
-    # Evaluate Custom model
-    try:
-        custom_forecast = forecast_custom(train, sku, target, test_size)
-        if "error" not in custom_forecast:
-            actuals = test[target].values
-            predicted = [f["yhat"] for f in custom_forecast]
-            results["custom"] = calculate_metrics(actuals, predicted)
-        else:
-            results["custom"] = {"error": custom_forecast["error"]}
-    except Exception as e:
-        results["custom"] = {"error": f"Evaluation failed: {str(e)}"}
+    if 'prophet' in models_to_test:
+        try:
+            prophet_forecast = forecast_prophet(train, sku, target, test_size)
+            if "error" not in prophet_forecast:
+                actuals = test[target].values
+                predicted = [f["yhat"] for f in prophet_forecast]
+                results["prophet"] = calculate_metrics(actuals, predicted)
+        except:
+            pass
     
-    # Evaluate Holt-Winters
-    try:
-        hw_forecast = holt_winters_forecast(train, sku, target, test_size)
-        if "error" not in hw_forecast:
-            actuals = test[target].values
-            predicted = [f["yhat"] for f in hw_forecast]
-            results["holt_winters"] = calculate_metrics(actuals, predicted)
-        else:
-            results["holt_winters"] = {"error": hw_forecast["error"]}
-    except Exception as e:
-        results["holt_winters"] = {"error": f"Evaluation failed: {str(e)}"}
-
-    # Evaluate ARIMA
-    try:
-        arima_forecast = forecast_arima(train, sku, target, test_size)
-        if "error" not in arima_forecast:
-            actuals = test[target].values
-            predicted = [f["yhat"] for f in arima_forecast]
-            results["arima"] = calculate_metrics(actuals, predicted)
-        else:
-            results["arima"] = {"error": arima_forecast["error"]}
-    except Exception as e:
-        results["arima"] = {"error": f"Evaluation failed: {str(e)}"}
-
-    # Evaluate SARIMA
-    try:
-        sarima_forecast = forecast_sarima(train, sku, target, test_size)
-        if "error" not in sarima_forecast:
-            actuals = test[target].values
-            predicted = [f["yhat"] for f in sarima_forecast]
-            results["sarima"] = calculate_metrics(actuals, predicted)
-        else:
-            results["sarima"] = {"error": sarima_forecast["error"]}
-    except Exception as e:
-        results["sarima"] = {"error": f"Evaluation failed: {str(e)}"}
+    if 'custom' in models_to_test:
+        try:
+            custom_forecast = forecast_custom(train, sku, target, test_size)
+            if "error" not in custom_forecast:
+                actuals = test[target].values
+                predicted = [f["yhat"] for f in custom_forecast]
+                results["custom"] = calculate_metrics(actuals, predicted)
+        except:
+            pass
+    
+    if 'holt_winters' in models_to_test:
+        try:
+            hw_forecast = holt_winters_forecast(train, sku, target, test_size)
+            if "error" not in hw_forecast:
+                actuals = test[target].values
+                predicted = [f["yhat"] for f in hw_forecast]
+                results["holt_winters"] = calculate_metrics(actuals, predicted)
+        except:
+            pass
     
     return results
 
 def calculate_metrics(actual, predicted):
-    # Handle division by zero in MAPE
     with np.errstate(divide='ignore', invalid='ignore'):
         mape = np.mean(np.abs((actual - predicted) / actual)) * 100
         mape = np.nan if np.isinf(mape) else mape
@@ -419,7 +262,21 @@ def calculate_metrics(actual, predicted):
         "mape": mape
     }
 
-def forecast_sku(df, sku, target="revenue", days=30):
+def forecast_sku_fast(df, sku, target="revenue", days=30):
+    """Fast forecasting - only use fastest models"""
+    # Use only the fastest models for production
+    prophet_result = forecast_prophet(df, sku, target, days)
+    custom_result = forecast_custom(df, sku, target, days)
+    hw_result = holt_winters_forecast(df, sku, target, days)
+    
+    return {
+        "prophet": prophet_result,
+        "custom": custom_result,
+        "holt_winters": hw_result
+    }
+
+def forecast_sku_comprehensive(df, sku, target="revenue", days=30):
+    """Comprehensive forecasting for when speed is less critical"""
     prophet_result = forecast_prophet(df, sku, target, days)
     custom_result = forecast_custom(df, sku, target, days)
     hw_result = holt_winters_forecast(df, sku, target, days)

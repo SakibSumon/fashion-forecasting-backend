@@ -5,7 +5,6 @@ prophet
 python-multipart
 scikit-learn
 statsmodels
-pydantic
 numpy
-matplotlib
+
 
