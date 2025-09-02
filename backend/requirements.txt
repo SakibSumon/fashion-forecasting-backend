@@ -6,5 +6,6 @@ python-multipart
 scikit-learn
 statsmodels
 pydantic
-joblib
-pmdarima
+numpy
+matplotlib
+

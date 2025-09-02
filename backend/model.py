@@ -12,8 +12,9 @@ import warnings
 warnings.filterwarnings('ignore')
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
-import pmdarima as pm
-from joblib import Parallel, delayed
+from statsmodels.tsa.stattools import adfuller
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+import matplotlib.pyplot as plt
 
 def load_data():
     file_path = os.path.join(os.path.dirname(__file__), "..", "dataset", "fashion_sales_dataset.csv")
@@ -190,8 +191,39 @@ def holt_winters_forecast(df, sku, target="revenue", periods=30, seasonal_period
     })
     return result.to_dict("records")
 
-def forecast_auto_arima(df, sku, target="revenue", days=30):
-    """AutoARIMA implementation with automatic parameter selection"""
+def find_best_arima_params(y, max_p=3, max_d=2, max_q=3):
+    """Find best ARIMA parameters using grid search with BIC"""
+    best_bic = float('inf')
+    best_order = (1, 1, 1)  # default
+    
+    # Test for stationarity to determine d
+    result = adfuller(y)
+    if result[1] > 0.05:
+        d_range = [1, 2]  # needs differencing
+    else:
+        d_range = [0, 1]
+    
+    for p in range(max_p + 1):
+        for d in d_range:
+            for q in range(max_q + 1):
+                if p == 0 and q == 0:
+                    continue  # Skip invalid orders
+                
+                try:
+                    model = ARIMA(y, order=(p, d, q))
+                    model_fit = model.fit()
+                    bic = model_fit.bic
+                    
+                    if bic < best_bic:
+                        best_bic = bic
+                        best_order = (p, d, q)
+                except:
+                    continue
+    
+    return best_order
+
+def forecast_arima(df, sku, target="revenue", days=30):
+    """ARIMA with automatic parameter selection"""
     df_sku = df[df["sku"] == sku].sort_values("order_date")
     if df_sku.shape[0] < 30:
         return {"error": f"Not enough data for ARIMA (need at least 30 points)."}
@@ -199,18 +231,17 @@ def forecast_auto_arima(df, sku, target="revenue", days=30):
     y = df_sku.set_index("order_date")[target]
 
     try:
-        # Use auto_arima to find optimal parameters
-        model = pm.auto_arima(
-            y,
-            seasonal=False,  # Non-seasonal ARIMA
-            stepwise=True,
-            suppress_warnings=True,
-            error_action='ignore',
-            trace=False,
-            information_criterion='aic'
-        )
+        # Find optimal parameters
+        best_order = find_best_arima_params(y)
         
-        forecast, conf_int = model.predict(n_periods=days, return_conf_int=True)
+        # Fit ARIMA model with best parameters
+        model = ARIMA(y, order=best_order)
+        model_fit = model.fit()
+
+        # Use get_forecast to obtain predictions + confidence intervals
+        forecast_obj = model_fit.get_forecast(steps=days)
+        forecast = forecast_obj.predicted_mean
+        conf_int = forecast_obj.conf_int(alpha=0.05)
 
         future_dates = pd.date_range(start=y.index[-1] + pd.Timedelta(days=1), periods=days)
 
@@ -218,17 +249,53 @@ def forecast_auto_arima(df, sku, target="revenue", days=30):
         for i in range(days):
             result.append({
                 "ds": future_dates[i],
-                "yhat": forecast[i],
-                "yhat_lower": conf_int[i, 0],
-                "yhat_upper": conf_int[i, 1]
+                "yhat": forecast.iloc[i],
+                "yhat_lower": conf_int.iloc[i, 0],
+                "yhat_upper": conf_int.iloc[i, 1]
             })
 
         return result
     except Exception as e:
-        return {"error": f"AutoARIMA model failed: {str(e)}"}
+        return {"error": f"ARIMA model failed: {str(e)}"}
 
-def forecast_auto_sarima(df, sku, target="revenue", days=30, seasonal_periods=7):
-    """AutoSARIMA implementation with automatic parameter selection"""
+def find_best_sarima_params(y, seasonal_periods=7, max_p=2, max_d=1, max_q=2, max_P=1, max_D=1, max_Q=1):
+    """Find best SARIMA parameters using grid search with BIC"""
+    best_bic = float('inf')
+    best_order = (1, 1, 1)
+    best_seasonal_order = (1, 1, 1, seasonal_periods)
+    
+    # Limited grid search for performance
+    for p in [0, 1, 2]:
+        for d in [0, 1]:
+            for q in [0, 1, 2]:
+                for P in [0, 1]:
+                    for D in [0, 1]:
+                        for Q in [0, 1]:
+                            if p == 0 and q == 0 and P == 0 and Q == 0:
+                                continue
+                            
+                            try:
+                                model = SARIMAX(
+                                    y,
+                                    order=(p, d, q),
+                                    seasonal_order=(P, D, Q, seasonal_periods),
+                                    enforce_stationarity=False,
+                                    enforce_invertibility=False
+                                )
+                                model_fit = model.fit(disp=False)
+                                bic = model_fit.bic
+                                
+                                if bic < best_bic:
+                                    best_bic = bic
+                                    best_order = (p, d, q)
+                                    best_seasonal_order = (P, D, Q, seasonal_periods)
+                            except:
+                                continue
+    
+    return best_order, best_seasonal_order
+
+def forecast_sarima(df, sku, target="revenue", days=30, seasonal_periods=7):
+    """SARIMA with automatic parameter selection"""
     df_sku = df[df["sku"] == sku].sort_values("order_date")
     if df_sku.shape[0] < 2 * seasonal_periods:
         return {"error": f"Not enough data for SARIMA (need at least {2*seasonal_periods} points)."}
@@ -236,19 +303,21 @@ def forecast_auto_sarima(df, sku, target="revenue", days=30, seasonal_periods=7)
     y = df_sku.set_index("order_date")[target]
 
     try:
-        # Use auto_arima to find optimal seasonal parameters
-        model = pm.auto_arima(
-            y,
-            seasonal=True,
-            m=seasonal_periods,
-            stepwise=True,
-            suppress_warnings=True,
-            error_action='ignore',
-            trace=False,
-            information_criterion='aic'
-        )
+        # Find optimal parameters
+        best_order, best_seasonal_order = find_best_sarima_params(y, seasonal_periods)
         
-        forecast, conf_int = model.predict(n_periods=days, return_conf_int=True)
+        model = SARIMAX(
+            y,
+            order=best_order,
+            seasonal_order=best_seasonal_order,
+            enforce_stationarity=False,
+            enforce_invertibility=False
+        )
+        model_fit = model.fit(disp=False)
+
+        forecast_obj = model_fit.get_forecast(steps=days)
+        forecast = forecast_obj.predicted_mean
+        conf_int = forecast_obj.conf_int(alpha=0.05)
 
         future_dates = pd.date_range(start=y.index[-1] + pd.Timedelta(days=1), periods=days)
 
@@ -256,14 +325,14 @@ def forecast_auto_sarima(df, sku, target="revenue", days=30, seasonal_periods=7)
         for i in range(days):
             result.append({
                 "ds": future_dates[i],
-                "yhat": forecast[i],
-                "yhat_lower": conf_int[i, 0],
-                "yhat_upper": conf_int[i, 1]
+                "yhat": forecast.iloc[i],
+                "yhat_lower": conf_int.iloc[i, 0],
+                "yhat_upper": conf_int.iloc[i, 1]
             })
 
         return result
     except Exception as e:
-        return {"error": f"AutoSARIMA model failed: {str(e)}"}
+        return {"error": f"SARIMA model failed: {str(e)}"}
 
 def evaluate_models(df, sku, target="revenue", test_size=30):
     df_sku = df[df["sku"] == sku].sort_values("order_date")
@@ -283,6 +352,8 @@ def evaluate_models(df, sku, target="revenue", test_size=30):
             actuals = test[target].values
             predicted = [f["yhat"] for f in prophet_forecast]
             results["prophet"] = calculate_metrics(actuals, predicted)
+        else:
+            results["prophet"] = {"error": prophet_forecast["error"]}
     except Exception as e:
         results["prophet"] = {"error": f"Evaluation failed: {str(e)}"}
     
@@ -293,6 +364,8 @@ def evaluate_models(df, sku, target="revenue", test_size=30):
             actuals = test[target].values
             predicted = [f["yhat"] for f in custom_forecast]
             results["custom"] = calculate_metrics(actuals, predicted)
+        else:
+            results["custom"] = {"error": custom_forecast["error"]}
     except Exception as e:
         results["custom"] = {"error": f"Evaluation failed: {str(e)}"}
     
@@ -303,26 +376,32 @@ def evaluate_models(df, sku, target="revenue", test_size=30):
             actuals = test[target].values
             predicted = [f["yhat"] for f in hw_forecast]
             results["holt_winters"] = calculate_metrics(actuals, predicted)
+        else:
+            results["holt_winters"] = {"error": hw_forecast["error"]}
     except Exception as e:
         results["holt_winters"] = {"error": f"Evaluation failed: {str(e)}"}
 
-    # Evaluate AutoARIMA
+    # Evaluate ARIMA
     try:
-        arima_forecast = forecast_auto_arima(train, sku, target, test_size)
+        arima_forecast = forecast_arima(train, sku, target, test_size)
         if "error" not in arima_forecast:
             actuals = test[target].values
             predicted = [f["yhat"] for f in arima_forecast]
             results["arima"] = calculate_metrics(actuals, predicted)
+        else:
+            results["arima"] = {"error": arima_forecast["error"]}
     except Exception as e:
         results["arima"] = {"error": f"Evaluation failed: {str(e)}"}
 
-    # Evaluate AutoSARIMA
+    # Evaluate SARIMA
     try:
-        sarima_forecast = forecast_auto_sarima(train, sku, target, test_size)
+        sarima_forecast = forecast_sarima(train, sku, target, test_size)
         if "error" not in sarima_forecast:
             actuals = test[target].values
             predicted = [f["yhat"] for f in sarima_forecast]
             results["sarima"] = calculate_metrics(actuals, predicted)
+        else:
+            results["sarima"] = {"error": sarima_forecast["error"]}
     except Exception as e:
         results["sarima"] = {"error": f"Evaluation failed: {str(e)}"}
     
@@ -344,8 +423,8 @@ def forecast_sku(df, sku, target="revenue", days=30):
     prophet_result = forecast_prophet(df, sku, target, days)
     custom_result = forecast_custom(df, sku, target, days)
     hw_result = holt_winters_forecast(df, sku, target, days)
-    arima_result = forecast_auto_arima(df, sku, target, days)
-    sarima_result = forecast_auto_sarima(df, sku, target, days)
+    arima_result = forecast_arima(df, sku, target, days)
+    sarima_result = forecast_sarima(df, sku, target, days)
 
     return {
         "prophet": prophet_result,
